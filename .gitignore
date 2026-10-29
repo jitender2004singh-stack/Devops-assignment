@@ -1,0 +1,20 @@
+# Backups are generated locally
+backups/*.sql
+!backups/.gitkeep
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfplan
+plan.txt
+backend_override.tf
+# keep the lock files so provider versions are pinned
+!.terraform.lock.hcl
+
+.env
+.DS_Store
+plan-*.txt
+.terraform-offline/
+offline.tfstate

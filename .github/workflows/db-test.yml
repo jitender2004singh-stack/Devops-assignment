@@ -1,0 +1,30 @@
+name: Database backup and restore test
+
+on:
+  pull_request:
+    paths:
+      - "db/**"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - ".github/workflows/db-test.yml"
+  workflow_dispatch:
+
+jobs:
+  backup-restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start the database (migrations + seed run on first start)
+        run: docker compose up -d --wait
+
+      - name: Backup
+        run: ./scripts/backup.sh
+
+      - name: Restore into a fresh database and verify
+        run: ./scripts/restore.sh
+
+      - name: Database logs (on failure)
+        if: failure()
+        run: docker compose logs db

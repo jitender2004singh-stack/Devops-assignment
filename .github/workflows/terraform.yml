@@ -1,0 +1,125 @@
+name: Terraform plan
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: Plan (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.env }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff ../..
+
+      # The S3 backend needs AWS credentials. The plan only needs to be reviewed,
+      # so CI swaps it for a local backend (offline_plan = true skips AWS auth).
+      - name: Use local backend for the plan
+        run: |
+          cat > backend_override.tf <<'EOF'
+          terraform {
+            backend "local" {
+              path = "ci.tfstate"
+            }
+          }
+          EOF
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -refresh=false -input=false -no-color | tee plan.txt
+
+      - name: Show plan in the job summary
+        if: always() && steps.plan.outcome != 'skipped'
+        run: |
+          {
+            echo "### Terraform plan: ${{ matrix.env }}"
+            echo '```'
+            tail -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        if: always() && steps.plan.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.env }}
+          path: infra/envs/${{ matrix.env }}/plan.txt
+          if-no-files-found: ignore
+
+      - name: Comment plan on the pull request
+        if: always() && steps.plan.outcome != 'skipped' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ matrix.env }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const envName = process.env.ENV_NAME;
+            const marker = `<!-- terraform-plan-${envName} -->`;
+            let plan = fs.readFileSync(`infra/envs/${envName}/plan.txt`, 'utf8');
+            const max = 60000;
+            if (plan.length > max) {
+              plan = plan.slice(0, max) + '\n... (truncated, see the workflow artifact)';
+            }
+            const body = [
+              marker,
+              `### Terraform plan: \`${envName}\` (${process.env.PLAN_OUTCOME})`,
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
